@@ -1,0 +1,769 @@
+# Banking Monolith Decomposition
+
+## Overview
+
+This SOP guides an agent through the full decomposition of a monolithic banking application into independently deployable microservices, each aligned to a BIAN (Banking Industry Architecture Network) functional domain. The agent follows sequential phases — from codebase analysis through to scaffolding, test generation, and reporting.
+
+The SOP produces independently deployable units that can co-exist alongside the monolith. The decision of how and when to adopt a migration pattern (e.g., Strangler Fig, parallel run, big-bang cutover) is an architectural and operational decision made **outside this SOP** by the team owning the monolith.
+
+The monolith maps to 3 BIAN domains:
+- **Domain 1 — Customer & Party Management** (Customer Profile, KYC, Party Reference Data, Customer Agreement, CRM)
+- **Domain 2 — Product & Account Servicing** (Current/Savings/Deposit Accounts, Consumer Loan, Credit Facility, Card Transaction, Product Directory)
+- **Domain 3 — Payments & Financial Transactions** (Payment Order, Payment Execution, ACH Fulfillment, Wire Transfer, Payment Tracking, Correspondent Bank)
+
+---
+
+## Parameters
+
+- **monolith_path** (required): Root path of the monolith codebase to analyze
+- **output_path** (optional, default: `./decomposed`): Directory where scaffolded service directories will be created
+- **report_path** (optional, default: `./decomposition-report.md`): Path for the final decomposition report
+- **language** (optional, default: `java`): Primary programming language of the monolith (e.g., `java`, `python`, `csharp`, `nodejs`)
+- **db_type** (optional, default: `same-as-monolith`): Target database engine for the decomposed service schemas. Defaults to the same database type detected in the monolith (e.g., if the monolith uses H2, the decomposed schemas default to H2). Set explicitly to override — e.g., `postgresql`, `mysql`, `h2`, `oracle`, `mssql`. Affects DDL dialect in Step 4c, JPA dialect annotation in generated entity classes, and the JDBC driver dependency in each service `pom.xml`.
+- **test_framework** (optional, default: `junit5`): Unit test framework to use (e.g., `junit5`, `testng` for Java; `pytest` for Python; `xunit` for C#; `jest` for Node.js)
+- **phase** (optional, default: `all`): Which phase to execute — `1`, `2`, `3`, `4`, `5`, `6`, `7`, or `all`
+
+**Constraints for parameter acquisition:**
+- You MUST ask for all required parameters upfront in a single prompt rather than one at a time
+- You MUST confirm the monolith_path exists and is readable before proceeding
+- You MUST NOT proceed if monolith_path is empty or inaccessible because subsequent steps depend entirely on reading the actual codebase
+
+---
+
+## Steps
+
+### 1. Codebase Inventory
+
+Read and map the full structure of the monolith codebase at `monolith_path`.
+
+**Constraints:**
+- You MUST list all top-level modules, packages, and layers (e.g., controllers, services, repositories, models)
+- You MUST identify all API entry points: REST controllers, batch jobs, message listeners, scheduled tasks
+- You MUST document all database schemas, entity models, and shared data objects found in the codebase
+- You MUST list every `enum` type found in the codebase with its exact declared values � copy them verbatim from the source file; do NOT infer, rename, or paraphrase enum constants
+- You MUST build a dependency map showing which modules call which other modules
+- You SHOULD identify the build system (Maven, Gradle, npm, etc.) and note any existing module boundaries
+- You MUST inventory all externalised configuration files (`application.yml`, `application.properties`, `application-{profile}.yml`, `*.xml` Spring configs, `logback.xml`, `log4j2.xml`, `bootstrap.yml`, `persistence.xml`, `web.xml`, `beans.xml`) and record every property key-value pair found, tagged with the domain it belongs to (customer, account, payments, or shared)
+- You MUST save the inventory as `{output_path}/phase1-inventory.md` before proceeding to Step 2
+- You MUST NOT skip any subdirectory during the scan because missing a module could lead to incorrect domain assignments in later steps
+
+### 2. Domain Classification
+
+Classify every module, class, and database table to one or more BIAN domains, then determine the appropriate decomposition action for each.
+
+**Classification rules (use these to tag each element):**
+- Customer identity, onboarding, KYC, profile, agreements → `customer-service`
+- Account lifecycle, transactions, product catalog, loans, cards → `account-service`
+- Payment orders, execution, ACH, SWIFT, wire transfer, tracking → `payments-service`
+- Auth, logging, config, common DTOs, error handling → `shared-kernel`
+
+**Constraints:**
+- You MUST analyse each module/class at the method level, not just the class level, because a single class may contain methods that belong to different domains
+- You MUST assign one of the following decomposition actions to every module/class:
+
+  | Action | When to use |
+  |---|---|
+  | `move` | All methods in the class belong to a single domain — move the whole class as-is |
+  | `split` | Methods in the class belong to 2 or more domains — the class must be broken apart into domain-specific classes |
+  | `extract-method` | A single method contains interleaved logic for multiple domains — the method must be refactored before it can be moved |
+  | `shared-kernel` | The class has zero domain-specific business logic (auth, logging, config, DTOs) — move to shared library |
+  | `facade` | The class is a public entry point (controller, API handler) that orchestrates multiple domains — flag for review; the team will decide whether to keep it in the monolith, split it, or replace it as part of their chosen migration strategy |
+
+- You MUST produce the classification as a markdown table with columns: `Module/Class | Methods | Domains Touched | Action | Target Service(s) | Notes`
+- For every class marked `split`, you MUST list which methods go to which target service
+- For every class marked `extract-method`, you MUST identify the specific method(s) with interleaved logic and describe the proposed split (e.g., "lines 45–80 handle payment validation → payments-service; lines 81–110 update account balance → account-service")
+- You MUST flag any method where domain boundary is genuinely unclear as `ambiguous` and document the reason and a recommended ownership decision
+- You MUST save the full classification matrix as `{output_path}/phase2-classification.md`
+- You MUST NOT assign a class to `shared-kernel` unless it has zero domain-specific business logic because shared-kernel bloat defeats the purpose of decomposition
+- You MUST NOT mark a class as `move` without first verifying all its methods belong to the same domain because incorrect moves create hidden cross-domain coupling in the target service
+
+### 3. Service Boundary & Contract Definition
+
+Define what each domain service owns and how the 3 services communicate.
+
+**Constraints:**
+- You MUST define the aggregate roots and owned entities for each of the 3 domains
+- You MUST define data ownership: each database table MUST be assigned to exactly one domain
+- You MUST identify all cross-domain data reads and propose whether they are resolved via a synchronous REST API call (query) or a REST notification callback (state change)
+- You MUST define the following minimum inter-domain contracts:
+
+  **Synchronous REST APIs (cross-domain queries):**
+  - `GET /customers/{id}` — exposed by customer-service, consumed by account-service and payments-service
+  - `GET /accounts/{id}` — exposed by account-service, consumed by payments-service
+
+  **REST Notification Callbacks (state change propagation):**
+  All inter-service notifications use `POST /internal/events` on the target service with a `DomainEvent` JSON payload. No message broker required — pure HTTP.
+  - `CustomerRegistered` — customer-service → POST to account-service
+  - `CustomerProfileUpdated` — customer-service → POST to account-service, payments-service
+  - `CustomerSuspended` — customer-service → POST to account-service (freezes accounts), payments-service
+  - `CustomerClosed` — customer-service → POST to account-service, payments-service
+  - `AccountOpened` — account-service → POST to payments-service, customer-service
+  - `AccountStatusChanged` — account-service → POST to payments-service, customer-service
+  - `PaymentExecuted` — payments-service → POST to account-service (triggers balance debit/credit)
+  - `PaymentFailed` — payments-service → POST to account-service
+
+- You MUST generate a `DomainEvent` DTO in `shared-kernel` with fields: `eventId` (UUID), `type` (String), `occurredAt` (ISO8601), `payload` (Map)
+- You MUST generate an `EventPublisher` class per service that calls the target service's `/internal/events` endpoint using `RestTemplate` or equivalent HTTP client
+- You MUST generate an `InternalEventController` per service that receives `POST /internal/events` and routes to the appropriate handler method based on `event.type`
+- You SHOULD flag any notification callback that could cause a circular call chain (A notifies B, B notifies A for the same event) and document that the receiver MUST NOT re-notify the original sender
+- You MUST save the contract definitions as `{output_path}/phase3-contracts.md`
+- You MUST NOT design shared databases between services because shared databases create tight coupling that defeats microservice independence
+
+### 4. Database Decomposition
+
+Decompose the monolith's shared database into domain-owned schemas, one per deployable service. This step produces the migration SQL and the read-model strategy for cross-domain data access.
+
+**4a — Inventory the Shared Schema**
+
+**Constraints:**
+- You MUST list every table in the monolith database with its columns, primary keys, foreign keys, and indexes
+- You MUST identify every foreign key that crosses a domain boundary (e.g., `accounts.customer_id` references `customers.id` — crosses Customer → Account boundary)
+- You MUST identify every table that is written to by more than one domain's service code
+- You MUST save the shared schema inventory as `{output_path}/phase4a-shared-schema.md`
+
+**4b — Assign Table Ownership**
+
+Apply the following ownership rules:
+
+| Table | Owning Domain | Rationale |
+|---|---|---|
+| `customers` | customer-service | Core customer identity and KYC data |
+| `kyc_verifications` | customer-service | KYC document records belong to customer domain |
+| `customer_agreements` | customer-service | Agreements are a customer lifecycle concern |
+| `accounts` | account-service | Account lifecycle and balance owned by account domain |
+| `account_products` | account-service | Product catalog is an account servicing concern |
+| `transactions` | payments-service | Transaction ledger is a payments execution record |
+| `payment_orders` | payments-service | Payment instructions owned by payments domain |
+| `payment_rails` | payments-service | ACH/SWIFT/WIRE rail config owned by payments domain |
+| `audit_log` | shared-kernel | Cross-cutting — replicated to each service's own schema |
+
+**Constraints:**
+- You MUST assign every table to exactly one owning domain
+- You MUST NOT leave any table assigned to multiple domains because shared table ownership is the primary source of deployment coupling
+- For every cross-domain foreign key found in 4a, you MUST replace it with one of:
+  - A **denormalised reference column** (store the remote ID + a snapshot of key fields, no FK constraint) — use when the remote data changes rarely
+  - A **read-model table** (local copy of remote data, kept in sync via REST notification callbacks) — use when the remote data is queried frequently
+  - A **synchronous API call** at runtime — use only when freshness is critical and latency is acceptable
+- You MUST document the chosen strategy for each cross-domain FK in `{output_path}/phase4b-table-ownership.md`
+
+**4c — Generate Domain Schema DDL**
+
+For each of the 3 domain databases, generate a standalone DDL script that:
+- Contains only the tables owned by that domain
+- Replaces all cross-domain foreign keys with plain reference columns (no FK constraint to another service's DB)
+- Adds any read-model tables needed to cache data from other domains
+- Includes all indexes required for the domain's query patterns
+
+**Constraints:**
+- You MUST write each DDL file dnto `src/main/resources/db/migration/` inside each service directory. Flyway scans `classpath:db/migration` by default; a root-level `db/` folder is outside the JAR classpath and will be silently skipped, causing startup failure:
+  - `{output_path}/customer-service/src/main/resources/db/migration/V1__customer_schema.sql`
+  - `{output_path}/account-service/src/main/resources/db/migration/V1__account_schema.sql`
+  - `{output_path}/payments-service/src/main/resources/db/migration/V1__payments_schema.sql`
+- You MUST NOT place generated schema files inside the monolith codebase because the monolith's shared schema is the input to this process, not the output
+- Each DDL file MUST be self-contained and executable against a fresh `{db_type}` database with no dependencies on another service's schema
+- You MUST add a comment on every column that replaces a cross-domain FK explaining what it references and how it is kept in sync (e.g., `-- ref: customers.id, synced via CustomerProfileUpdated REST notification`)
+- You MUST NOT include cross-database foreign key constraints because they create hard runtime coupling between services
+- You MUST include a `schema_version` migration table in each schema so migrations can be tracked independently per service
+
+**4c — Generate JPA Entity Classes**
+
+For each table in the domain schema, generate a JPA entity class in the service's `src/main/java/` directory.
+
+**Constraints:**
+- You MUST detect the monolith's existing database type from its datasource configuration (e.g., `application.yml`, `application.properties`, or `persistence.xml`) and use that as the default `db_type` unless the user has explicitly overridden it
+- You MUST generate entity classes using the JPA dialect and annotations appropriate for `{db_type}`:
+
+  | db_type | JPA dialect annotation | JDBC driver artifact |
+  |---|---|---|
+  | `postgresql` | `@Column(columnDefinition=...)` with PostgreSQL types; dialect: `PostgreSQLDialect` | `org.postgresql:postgresql` |
+  | `mysql` | standard JPA; dialect: `MySQLDialect` | `com.mysql:mysql-connector-j` |
+  | `h2` | standard JPA; dialect: `H2Dialect` | `com.h2database:h2` |
+  | `oracle` | `@Column(columnDefinition=...)` with Oracle types; dialect: `OracleDialect` | `com.oracle.database.jdbc:ojdbc11` |
+  | `mssql` | standard JPA; dialect: `SQLServerDialect` | `com.microsoft.sqlserver:mssql-jdbc` |
+
+- You MUST annotate each entity with `@Entity`, `@Table(name="...")`, and `@Id @GeneratedValue`
+- You MUST copy all `enum` types and their constants verbatim from the monolith source � read the actual source file and reproduce the exact constant names; do NOT infer or substitute values
+- You MUST replace all cross-domain `@ManyToOne` / `@OneToMany` JPA relationships with plain scalar reference columns (e.g., `private Long customerId` instead of `@ManyToOne Customer customer`) because the referenced entity lives in a different service's database
+- You MUST add a comment on every cross-domain reference field explaining the sync strategy (e.g., `// ref: customer-service.customers.id — validated via GET /customers/{id} at write time`)
+- You MUST add `@JsonIgnore` on any bidirectional relationship fields to prevent circular serialisation
+- You MUST update the JDBC driver dependency in each service's `pom.xml` to match `{db_type}` — replace the default `postgresql` driver with the correct driver for the target database
+- You MUST update `spring.jpa.database-platform` in `application.yml` to the correct Hibernate dialect for `{db_type}`
+- You SHOULD use Lombok `@Data` to reduce boilerplate, consistent with the monolith's existing style
+
+**4d — Generate Domain Schema DDL**
+
+For each of the 3 domain databases, generate a standalone DDL script that:
+- Contains only the tables owned by that domain
+- Uses DDL syntax appropriate for `{db_type}`
+- Replaces all cross-domain foreign keys with plain reference columns (no FK constraint to another service's DB)
+- Adds any read-model tables needed to cache data from other domains
+- Includes all indexes required for the domain's query patterns
+
+**Constraints:**
+- You MUST write each DDL file dnto `src/main/resources/db/migration/` inside each service directory. Flyway scans `classpath:db/migration` by default; a root-level `db/` folder is outside the JAR classpath and will be silently skipped, causing startup failure:
+  - `{output_path}/customer-service/src/main/resources/db/migration/V1__customer_schema.sql`
+  - `{output_path}/account-service/src/main/resources/db/migration/V1__account_schema.sql`
+  - `{output_path}/payments-service/src/main/resources/db/migration/V1__payments_schema.sql`
+- You MUST NOT place generated schema files inside the monolith codebase because the monolith's shared schema is the input to this process, not the output
+- Each DDL file MUST be self-contained and executable against a fresh `{db_type}` database with no dependencies on another service's schema
+- You MUST NOT include cross-database foreign key constraints because they create hard runtime coupling between services
+- You MUST include a `schema_version` migration table in each schema so migrations can be tracked independently per service
+
+**4e — Define Data Migration Options**
+
+**Constraints:**
+- You MUST document the data migration sequence needed to move data from the monolith's shared database into the 3 domain databases, should the team choose to do so:
+  1. Stand up 3 new empty databases (one per service)
+  2. Run each domain DDL script against its target database
+  3. Migrate data table by table, starting with the domain that has the fewest cross-domain dependencies (customer-service first)
+  4. Validate row counts and checksums after each table migration
+- You MUST identify any tables that require a data transformation (not just a copy) during migration and describe the transformation
+- You MUST flag any table with more than 10 million rows as a `large-table` migration risk requiring an incremental/online migration strategy
+- You MUST save the migration options as `{output_path}/phase4e-migration-plan.md`
+- You MUST NOT prescribe a specific cutover strategy (dual-write, Strangler Fig, big-bang, parallel run) because that decision is made outside this SOP by the team owning the monolith
+- You SHOULD document the trade-offs of common migration approaches (dual-write period, parallel run, big-bang) as informational notes so the team has the context to decide
+
+### 5. Scaffold Deployable Units
+
+Create the skeleton directory structure for each of the 3 deployable services and the shared kernel.
+
+**Constraints:**
+- You MUST create the following directory structure under `output_path`:
+
+```
+{output_path}/
+├── customer-service/
+│   ├── src/
+│   │   ├── main/java/
+│   │   └── test/java/                  ← populated by Step 6
+│   ├── src/main/resources/
+│   │   └── application.yml
+│   ├── db/
+│   │   └── V1__customer_schema.sql     ← generated by Step 4c
+│   ├── Dockerfile
+│   ├── pom.xml                         ← Spring Boot build descriptor
+│   └── README.md
+├── account-service/
+│   ├── src/
+│   │   ├── main/java/
+│   │   └── test/java/                  ← populated by Step 6
+│   ├── src/main/resources/
+│   │   └── application.yml
+│   ├── db/
+│   │   └── V1__account_schema.sql      ← generated by Step 4c
+│   ├── Dockerfile
+│   ├── pom.xml                         ← Spring Boot build descriptor
+│   └── README.md
+├── payments-service/
+│   ├── src/
+│   │   ├── main/java/
+│   │   └── test/java/                  ← populated by Step 6
+│   ├── src/main/resources/
+│   │   └── application.yml
+│   ├── db/
+│   │   └── V1__payments_schema.sql     ← generated by Step 4c
+│   ├── Dockerfile
+│   ├── pom.xml                         ← Spring Boot build descriptor
+│   └── README.md
+├── shared-kernel/
+│   ├── src/
+│   │   ├── main/java/
+│   │   └── test/java/                  ← populated by Step 6
+│   ├── pom.xml                         ← plain JAR, no Spring Boot plugin
+│   └── README.md
+└── docker-compose.yml                  ← 3 services + 3 separate DB instances
+```
+
+- You MUST run Step 4 (Database Decomposition) before this step because the `db/` directories depend on the DDL files generated in Step 4c
+- You MUST NOT create the `db/` directories with placeholder content — they MUST contain the actual generated DDL from Step 4c
+
+**pom.xml generation rules:**
+
+- You MUST generate a `pom.xml` for every deployable service (`customer-service`, `account-service`, `payments-service`) using the following template, substituting `{service-name}` and `{base-package}`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.0</version>
+    </parent>
+    <groupId>com.bank</groupId>
+    <artifactId>{service-name}</artifactId>
+    <version>1.0.0</version>
+    <properties>
+        <java.version>17</java.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.flywaydb</groupId>
+            <artifactId>flyway-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>com.bank</groupId>
+            <artifactId>shared-kernel</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+        <!-- Test dependencies -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- H2: no scope — available at runtime for local profile AND test -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+        </dependency>
+        <!-- spring-security-test: required for @WithMockUser in controller tests -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.flywaydb</groupId>
+                <artifactId>flyway-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+- You MUST generate a `pom.xml` for `shared-kernel` as a plain JAR (no `spring-boot-maven-plugin`, no `spring-boot-starter-parent`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>com.bank</groupId>
+    <artifactId>shared-kernel</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+    </properties>
+    <dependencies>
+        <!-- Spring Context — provided at runtime by each consuming service -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-context</artifactId>
+            <version>6.1.1</version>
+            <scope>provided</scope>
+        </dependency>
+        <!-- SLF4J API — provided at runtime by each consuming service -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>2.0.9</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>1.18.30</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.10.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.9</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- AssertJ: fluent assertions used in shared-kernel unit tests -->
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.24.2</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.11.0</version>
+                <configuration>
+                    <source>17</source>
+                    <target>17</target>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>1.18.30</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+- You MUST NOT add `spring-boot-maven-plugin` to `shared-kernel` because it is a library JAR consumed by the 3 services, not a standalone runnable application
+- You MUST use the JDBC driver in service `pom.xml` files that matches `{db_type}` (default: `postgresql` driver if `db_type` is `same-as-monolith` and the monolith uses PostgreSQL; otherwise use the driver for the detected or specified `db_type`)
+- You MUST include `flyway-core` in each service `pom.xml` so the `db/V1__*_schema.sql` migration runs automatically on startup
+- You MUST include `h2` with **no scope** (not `test` scope) in each service `pom.xml` so H2 is available both at runtime for the local development profile and during test execution
+- You MUST include `spring-boot-starter-test` in `test` scope — this brings in JUnit 5, Mockito, and MockMvc needed for Step 6 tests
+- You MUST include `spring-security-test` in `test` scope — required for `@WithMockUser` and `@AutoConfigureMockMvc(addFilters=false)` in controller tests; without it, Spring Security blocks all test requests with 401/403
+- You MUST include `assertj-core` in `test` scope in `shared-kernel` — required for fluent assertions in shared-kernel unit tests; it is not transitively available without `spring-boot-starter-test`
+- You SHOULD adjust the Spring Boot version to match the version used in the monolith's `pom.xml`
+- You MUST generate an `application-local.yml` alongside `application.yml` in each service's `src/main/resources/` that overrides the datasource to use H2 in-memory, disables Flyway, sets `ddl-auto: create-drop`, and points service URLs to `localhost` — this allows the service to start locally without a running PostgreSQL instance or other services
+
+- You MUST populate each `README.md` with: domain name, BIAN service domains it covers, owned entities, published events, consumed events, and exposed APIs
+- You MUST create a minimal `Dockerfile` for each service using the appropriate base image for `language`
+- You MUST create `src/main/resources/application.yml` for each service with placeholder database URL, username, password, `spring.jpa.hibernate.ddl-auto: none` (Flyway owns schema creation; Hibernate must NOT validate or create tables), and `spring.flyway.locations: classpath:db/migration`
+- You MUST copy into each service's `application.yml` only the configuration properties that are relevant to that service's domain � identified from the config inventory in Phase 1. Do NOT copy properties that belong to another domain's service. Shared infrastructure properties (logging levels, actuator, tracing) MUST be copied to all services. Properties whose domain ownership is ambiguous MUST be copied to all services that could need them and flagged with a comment`# TODO: verify this property is needed by this service`
+- You MUST create `src/test/resources/application.properties` for each service containing:
+  ```properties
+  spring.flyway.enabled=false
+  spring.jpa.hibernate.ddl-auto=create-drop
+  spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
+  spring.datasource.driver-class-name=org.h2.Driver
+  spring.datasource.username=sa
+  spring.datasource.password=
+  ```
+  This ensures all test slices (`@DataJpaTest`, `@WebMvcTest`, `@SpringBootTest`) use H2 and do not attempt to connect to PostgreSQL or run Flyway migrations
+- You MUST annotate every `@DataJpaTest` repository test class with both `@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)` and `@TestPropertySource(properties = {"spring.flyway.enabled=false", "spring.jpa.hibernate.ddl-auto=create-drop"})` because `@DataJpaTest` does not pick up `application.properties` for Flyway configuration
+- You MUST annotate every `@WebMvcTest` controller test class with `@AutoConfigureMockMvc(addFilters = false)` and `@WithMockUser` to bypass Spring Security filters — without these, all test requests return 401/403 regardless of the controller logic
+- You MUST construct any service class that takes `Optional<T>` constructor parameters manually in tests using `@BeforeEach` rather than `@InjectMocks`, because Mockito cannot inject `Optional`-wrapped dependencies via `@InjectMocks`
+- You SHOULD create a root-level `docker-compose.yml` that wires all 3 services together with **3 separate database instances** (one per service, using the image appropriate for `{db_type}`) — no message broker container required
+- You MUST NOT put shared database connection strings in service configs because each service must own its own data store
+- You MUST NOT reuse the same database container for more than one service in docker-compose because that recreates the shared-DB anti-pattern
+- You MUST add service URL properties to each `application.yml` for every downstream service it calls (e.g., `account-service.base-url`, `payments-service.base-url`) so the `EventPublisher` and cross-domain clients can resolve target URLs via configuration
+
+### 6. Unit Test Generation
+
+For every class moved or generated into a decomposed service in Step 5, generate a corresponding unit test class covering all public methods. Tests are written into each service's `src/test/` directory and must be runnable in isolation without depending on other services or shared databases.
+
+**6a — Service Layer Tests**
+
+For each service class (e.g., `CustomerService`, `AccountService`, `PaymentService`) in every decomposed module:
+
+**Constraints:**
+- You MUST generate one test class per service class, named `{ClassName}Test`, placed at the mirrored path under `src/test/`
+- You MUST cover the following test categories for every public method:
+  - **Happy path** — valid inputs, expected output or state change
+  - **Validation / guard clause** — invalid or missing inputs that should throw exceptions
+  - **Domain boundary** — verify the method does NOT directly call another domain's repository or service (assert via mock verification that cross-domain calls go through the defined contract interface only)
+- You MUST mock all external dependencies (repositories, cross-domain API clients, event publishers) using the mocking library appropriate for `test_framework` (e.g., Mockito for JUnit5, `unittest.mock` for pytest, Moq for xunit, Jest mocks for Node.js)
+- You MUST NOT use a real database in unit tests because unit tests must run without infrastructure
+- You MUST NOT call other services' real implementations in unit tests because that makes them integration tests, not unit tests
+- You SHOULD aim for at least 80% line coverage per service class
+- You MUST save test classes under `{output_path}/{service-name}/src/test/`
+
+**6b — Repository Layer Tests**
+
+For each repository interface or data access class:
+
+**Constraints:**
+- You MUST generate one test class per repository, named `{ClassName}Test`
+- You MUST use an in-memory or embedded database appropriate for `language` and `test_framework` (e.g., H2 for JUnit5/Spring, SQLite for pytest, LocalDB for xunit)
+- You MUST cover: save, findById, findBy custom query methods, and delete operations
+- You MUST verify that queries return correct results for both existing and non-existing records
+- You MUST NOT connect to the production or shared monolith database because repository tests must be self-contained
+
+**6c — Controller / API Layer Tests**
+
+For each REST controller or API handler class:
+
+**Constraints:**
+- You MUST generate one test class per controller, named `{ClassName}Test`
+- You MUST use a lightweight HTTP test harness appropriate for `language` (e.g., `MockMvc` for Spring, `TestClient` for FastAPI, `WebApplicationFactory` for ASP.NET, `supertest` for Express)
+- You MUST cover for every endpoint:
+  - **200/201 success** — valid request body, expected response shape and status code
+  - **400 bad request** — missing required fields or invalid values
+  - **404 not found** — resource does not exist
+  - **409 conflict** — duplicate or state violation (where applicable)
+- You MUST mock the service layer so controller tests do not execute business logic
+- You MUST verify response body structure, not just status codes, because contract correctness matters for inter-service consumers
+
+**6d — REST Notification Tests**
+
+For each `EventPublisher` class and each `InternalEventController` (notification receiver):
+
+**Constraints:**
+- You MUST generate tests that verify the correct `DomainEvent` payload is sent when a domain action completes (e.g., after `registerCustomer()` succeeds, assert that `EventPublisher.notify()` was called with a `CustomerRegistered` event containing the correct `customerId` and `email`)
+- You MUST mock the `RestTemplate` (or equivalent HTTP client) in `EventPublisher` tests — do not make real HTTP calls to other services
+- You MUST generate tests for `InternalEventController` that POST a `DomainEvent` JSON body and verify the correct handler method is invoked and the correct state change occurs
+- You MUST verify the happy path (notification sent successfully, receiver processes correctly) and the failure path (target service unreachable — verify the publisher logs a warning and does NOT throw an exception that would roll back the originating transaction)
+- You MUST NOT start a real HTTP server or connect to a real downstream service in unit tests because that makes them integration tests
+
+**6e — Shared Kernel Tests**
+
+For every utility class in `shared-kernel`:
+
+**Constraints:**
+- You MUST generate tests for all public methods in shared utilities (e.g., `ReferenceGenerator`, `AuditLogger`, common DTOs, validators)
+- You MUST verify that shared utilities produce deterministic, side-effect-free outputs where applicable
+- You MUST NOT test shared kernel classes inside a domain service's test suite — they belong in `shared-kernel/src/test/` so they are tested once and reused
+
+**Test file naming and location summary:**
+
+| Module | Test location | Naming convention |
+|---|---|---|
+| `customer-service` | `customer-service/src/test/` | `{ClassName}Test.{ext}` |
+| `account-service` | `account-service/src/test/` | `{ClassName}Test.{ext}` |
+| `payments-service` | `payments-service/src/test/` | `{ClassName}Test.{ext}` |
+| `shared-kernel` | `shared-kernel/src/test/` | `{ClassName}Test.{ext}` |
+
+### 7. Generate Decomposition Report
+
+Produce a comprehensive report summarising all findings and recommended next steps.
+
+**Constraints:**
+- You MUST write the report to `report_path`
+- You MUST include the following sections in the report:
+  1. **Executive Summary** — monolith size, number of modules classified, 3 target services identified
+  2. **Domain Classification Matrix** — full table from Phase 2
+  3. **Ambiguous Modules** — list of flagged items with recommended ownership decisions
+  4. **Inter-Domain Contracts** — synchronous REST query APIs and REST notification callback contracts (DomainEvent payloads per event type) from Phase 3
+  5. **Database Decomposition Summary** — table ownership assignments, cross-domain FK resolutions, and read-model decisions from Phase 4
+  6. **Data Migration Options** — migration sequence, large-table risks, and trade-off notes on migration approaches (dual-write, parallel run, big-bang) from Phase 4e — decision on approach left to the team
+  7. **Shared Kernel Contents** — list of cross-cutting components extracted
+  8. **Recommended Decomposition Order** — suggested sequence for scaffolding services based on coupling analysis (least coupled first), presented as a recommendation not a prescription
+  9. **Risk Register** — at minimum cover: data consistency, distributed transactions, network latency, team silos, large-table migration complexity
+  10. **Definition of Done checklist** — per service: code extracted, own DB schema with migration scripts, OpenAPI spec for REST APIs, REST notification contract documented (DomainEvent payloads), unit tests generated with ≥80% coverage, CI/CD pipeline (including test execution gate), observability, integration tests passing
+  11. **Recommended Next Steps** — prioritised action list
+- You MUST NOT omit the Risk Register section because unaddressed risks are the primary cause of failed decomposition projects
+- You SHOULD include estimated effort (S/M/L) for each recommended next step
+
+---
+
+## Examples
+
+### Example invocation in Kiro CLI
+
+```
+run banking-monolith-decomposition.sop.md with monolith_path=./my-bank-app language=java
+```
+
+### Example classification table output (Phase 2)
+
+| Module / Class | Methods | Domains Touched | Action | Target Service(s) | Notes |
+|---|---|---|---|---|---|
+| `CustomerController` | `createCustomer`, `getCustomer`, `updateKYC` | customer | `move` | customer-service | All methods are customer domain |
+| `AccountService` | `openAccount`, `closeAccount`, `getBalance` | account | `move` | account-service | Pure account domain |
+| `PaymentOrderService` | `initiatePayment`, `trackPayment` | payments | `move` | payments-service | Pure payments domain |
+| `TransactionService` | `recordTransaction` (account logic), `triggerPayment` (payment logic) | account, payments | `split` | account-service, payments-service | `recordTransaction` → account-service; `triggerPayment` → payments-service |
+| `NotificationService` | `notifyCustomer` (customer), `notifyPaymentStatus` (payments) | customer, payments | `split` | customer-service, payments-service | Split by notification type |
+| `OnboardingService` | `registerCustomer` (customer), `openInitialAccount` (account), `setupPaymentProfile` (payments) | customer, account, payments | `split` | all 3 services | Orchestration logic flagged as `facade` — team decides migration approach |
+| `ProcessPaymentAndDebit` | Single method with interleaved payment validation + account debit | payments, account | `extract-method` | payments-service, account-service | Lines 12–45: payment validation → payments-service; Lines 46–78: account debit → account-service |
+| `AuditLogger` | `log`, `logError` | none (cross-cutting) | `shared-kernel` | shared-kernel | No domain business logic |
+
+### Example REST notification contract (Phase 3)
+
+```
+POST /internal/events
+Host: account-service:8082
+Content-Type: application/json
+
+{
+  "eventId":    "a3f1c2d4-...",
+  "type":       "PaymentExecuted",
+  "occurredAt": "2026-04-22T10:15:30Z",
+  "payload": {
+    "paymentId":           123,
+    "orderReference":      "PAY20260422ABC",
+    "debitAccountNumber":  "ACC001",
+    "creditAccountNumber": "ACC002",
+    "amount":              "200.00",
+    "currency":            "USD",
+    "paymentType":         "INTERNAL"
+  }
+}
+```
+
+| Field | Sender | Receiver | Action on receipt |
+|---|---|---|---|
+| `PaymentExecuted` | payments-service | account-service | Debit `debitAccountNumber`, credit `creditAccountNumber` |
+| `CustomerSuspended` | customer-service | account-service | Freeze all accounts for `customerId` |
+| `AccountOpened` | account-service | customer-service | Update customer account summary read-model |
+
+### Example unit test output (Step 6 — Java/JUnit5/Mockito)
+
+```java
+// payments-service/src/test/java/com/bank/payments/service/PaymentServiceTest.java
+
+@ExtendWith(MockitoExtension.class)
+class PaymentServiceTest {
+
+    @Mock PaymentOrderRepository paymentOrderRepository;
+    @Mock CustomerServiceClient  customerServiceClient;   // cross-domain API client, not real service
+    @Mock AccountServiceClient   accountServiceClient;    // cross-domain API client, not real service
+    @Mock EventPublisher         eventPublisher;
+
+    @InjectMocks PaymentService paymentService;
+
+    // 6a: Happy path — initiate payment succeeds
+    @Test
+    void initiatePayment_validRequest_createsOrderAndPublishesEvent() {
+        // arrange
+        when(customerServiceClient.getCustomer(1L))
+            .thenReturn(new CustomerDto(1L, "Alice Smith", "ACTIVE"));
+        when(accountServiceClient.getAccount("ACC001"))
+            .thenReturn(new AccountDto("ACC001", "ACTIVE", new BigDecimal("1000.00")));
+        when(paymentOrderRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        // act
+        PaymentOrder result = paymentService.initiatePayment(
+            1L, "ACC001", "ACC002", new BigDecimal("200.00"), "USD",
+            PaymentOrder.PaymentType.INTERNAL, "Bob", "", "", "Invoice 42");
+
+        // assert
+        assertThat(result.getStatus()).isEqualTo(PaymentOrder.PaymentStatus.INITIATED);
+        assertThat(result.getAmount()).isEqualByComparingTo("200.00");
+        verify(eventPublisher).publish(argThat(e -> e.getType().equals("PaymentInitiated")));
+    }
+
+    // 6a: Guard clause — inactive customer is rejected
+    @Test
+    void initiatePayment_inactiveCustomer_throwsIllegalStateException() {
+        when(customerServiceClient.getCustomer(1L))
+            .thenReturn(new CustomerDto(1L, "Alice Smith", "SUSPENDED"));
+
+        assertThatThrownBy(() ->
+            paymentService.initiatePayment(1L, "ACC001", "ACC002",
+                new BigDecimal("200.00"), "USD", PaymentOrder.PaymentType.INTERNAL,
+                "Bob", "", "", "Invoice 42"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("not active");
+    }
+
+    // 6a: Domain boundary — verify no direct call to AccountRepository (wrong domain)
+    @Test
+    void initiatePayment_doesNotCallAccountRepositoryDirectly() {
+        // PaymentService must use AccountServiceClient (API contract), never AccountRepository
+        // If AccountRepository were injected here, this test would fail to compile — by design.
+        // Verify the client (not a repo) is the only account interaction.
+        when(customerServiceClient.getCustomer(anyLong()))
+            .thenReturn(new CustomerDto(1L, "Alice", "ACTIVE"));
+        when(accountServiceClient.getAccount(anyString()))
+            .thenReturn(new AccountDto("ACC001", "ACTIVE", new BigDecimal("500.00")));
+        when(paymentOrderRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+
+        paymentService.initiatePayment(1L, "ACC001", "ACC002",
+            new BigDecimal("100.00"), "USD", PaymentOrder.PaymentType.INTERNAL,
+            "Bob", "", "", "ref");
+
+        verify(accountServiceClient, times(1)).getAccount("ACC001");
+        // No AccountRepository mock exists in this test — proves boundary is clean
+    }
+
+    // 6d: Event test — PaymentExecuted event published with correct payload
+    @Test
+    void executePayment_onSuccess_publishesPaymentExecutedEvent() {
+        PaymentOrder order = buildValidatedOrder("PAY001", "ACC001", new BigDecimal("100.00"));
+        when(paymentOrderRepository.findByOrderReference("PAY001")).thenReturn(Optional.of(order));
+        when(paymentOrderRepository.save(any())).thenAnswer(i -> i.getArgument(0));
+        when(accountServiceClient.debit(any())).thenReturn(new TransactionDto("TXN001"));
+
+        paymentService.executePayment("PAY001");
+
+        verify(eventPublisher).publish(argThat(e ->
+            e.getType().equals("PaymentExecuted") &&
+            e.getPayload().get("orderReference").equals("PAY001")
+        ));
+    }
+}
+```
+
+---
+
+## Troubleshooting
+
+### A single method mixes domain logic with no clean split point
+If a method is so deeply interleaved that it cannot be split without a significant rewrite, you MUST mark it `extract-method`, describe the interleaved sections in the notes column, and add it to the Risk Register in the final report as a refactoring prerequisite. You MUST NOT move the method as-is into a target service because it will silently import cross-domain coupling into the new service.
+
+### Monolith has no clear package structure
+If the codebase has no module boundaries (everything in one package), you MUST classify at the class level rather than the module level. Use class names and method signatures to infer domain ownership.
+
+### A database table is used by all 3 domains
+If a table (e.g., `audit_log`, `notifications`) is read/written by multiple domains, you MUST assign ownership to the domain that writes to it most, and expose read access to other domains via API. Document this decision in the report.
+
+### Circular dependencies between domains
+If domain A calls domain B and domain B calls domain A for the same event (e.g., account-service notifies customer-service of `AccountOpened`, and customer-service then notifies account-service back), you MUST add a guard in the receiver's `InternalEventController` to detect and skip re-notification of the original sender. Document the circular chain and the guard logic in the contracts file.
+
+### Language not supported by default Dockerfile base image
+If `language` is not one of `java`, `python`, `csharp`, `nodejs`, you SHOULD ask the user to confirm the correct base image before creating Dockerfiles.
+
+### A table has a circular foreign key dependency between domains
+If table A (domain X) has a FK to table B (domain Y) and table B also has a FK back to table A, you MUST break one of the FKs by converting it to a denormalised reference column. Document which FK was broken and why in phase4b-table-ownership.md.
+
+### A shared table cannot be cleanly assigned to one domain
+If a table is genuinely co-owned (e.g., a `notifications` table written by 3 domains), you MUST split it into domain-specific tables (e.g., `customer_notifications`, `payment_notifications`) rather than keeping a shared table. Each domain owns and writes only to its own table.
+
+### Large table migration exceeds acceptable downtime window
+If a table has more than 10 million rows, you MUST flag it as a `large-table` migration risk in the report. You SHOULD document available incremental migration options (e.g., `pt-online-schema-change`, `gh-ost`, application-level backfill) as informational notes. You MUST NOT prescribe which approach to use because that decision depends on the team's operational constraints and chosen migration strategy.
+
+### A service class has no testable public methods
+If a class only contains private methods with no public surface, you MUST refactor it to expose the behaviour through a meaningful public interface before generating tests. You MUST NOT use reflection to test private methods because that couples tests to implementation details and breaks on refactoring.
+
+### A unit test requires a real database to pass
+If a generated test fails without a real database connection, the service class has a direct repository dependency that was not mocked. You MUST update the test to inject a mock repository and you MUST verify that the service class does not instantiate repositories directly (e.g., via `new`) because direct instantiation prevents mocking.
+
+### Cross-domain logic is untestable in isolation
+If a method cannot be tested without calling another domain's real service, the domain boundary was not cleanly extracted. You MUST introduce a client interface (e.g., `CustomerServiceClient`) that can be mocked, and update the service to depend on the interface rather than a concrete cross-domain call. Document this as a refactoring prerequisite in the report.
+
+### Service fails to start locally with "connection refused" to PostgreSQL
+The production `application.yml` points to a PostgreSQL host that does not exist locally. You MUST start the service with `--spring.profiles.active=local` to activate the `application-local.yml` profile which uses H2 in-memory. Do NOT modify the production `application.yml` to fix local startup issues.
+
+### @DataJpaTest fails with "missing table" despite application.properties disabling Flyway
+`@DataJpaTest` loads a restricted context that does not honour `application.properties` for Flyway. You MUST add `@AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.ANY)` and `@TestPropertySource(properties = {"spring.flyway.enabled=false", "spring.jpa.hibernate.ddl-auto=create-drop"})` directly on the test class.
+
+### @WebMvcTest returns 401 or 403 instead of expected status
+Spring Security is active in `@WebMvcTest` by default. You MUST add `@AutoConfigureMockMvc(addFilters = false)` to disable security filters and `@WithMockUser` to provide a mock authenticated principal. Also ensure `spring-security-test` is in `test` scope in `pom.xml`.
+
+### @InjectMocks fails with "Cannot instantiate" for service with Optional constructor parameter
+Mockito's `@InjectMocks` cannot resolve `Optional<T>` constructor parameters. You MUST construct the service manually in a `@BeforeEach` method: `service = new MyService(repo, logger, Optional.of(mockPublisher));`
+
+### Missing @SpringBootApplication causes @WebMvcTest or @DataJpaTest to fail with "Unable to find @SpringBootConfiguration"
+Spring test slices scan upward from the test class to find a `@SpringBootApplication` class. You MUST create a `{ServiceName}Application.java` with `@SpringBootApplication` in the service's root package (e.g., `com.bank.customer`). Without it, all Spring test slices fail to bootstrap.
