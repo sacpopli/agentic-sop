@@ -5,9 +5,9 @@
 
   "domain_model": "Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions",
 
-  "output_path": "../decomposed_e2e_v2",
+  "output_path": "../decomposed_e2e_v3",
 
-  "report_path": "../decomposed_e2e_v2/decomposition-report.md",
+  "report_path": "../decomposed_e2e_v3/decomposition-report.md",
 
   "language": "java",
 

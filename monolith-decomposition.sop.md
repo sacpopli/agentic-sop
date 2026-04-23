@@ -63,6 +63,23 @@ Parameters can be supplied in two ways:
 
 ## Steps
 
+### 0. Read Skills File
+
+**Before executing any phase, read `monolith-decomposition.skills.md` located alongside this SOP file.**
+
+This file contains:
+- Hard gates that MUST block execution (e.g., skip Step 6 if no test framework dep in build descriptor)
+- Conflict resolution rules (e.g., build descriptor overrides `config.test_framework`)
+- Pre-condition checklist for each phase
+- Known failure modes from prior runs
+
+**Constraints:**
+- You MUST read `monolith-decomposition.skills.md` before proceeding to Step 1
+- You MUST apply every hard gate and conflict resolution rule defined in that file throughout all phases
+- If `monolith-decomposition.skills.md` is not found alongside this SOP, log a warning and proceed with extra caution on all hard gates defined in this SOP
+
+---
+
 ### 1. Codebase Inventory
 
 Read and map the full structure of the monolith codebase at `monolith_path`.
