@@ -2,12 +2,17 @@
 
 ## Overview
 
-This SOP translates the domain decomposition output from `banking-monolith-decomposition.sop.md`
-into buildable Spring Boot / Maven modules.
+This SOP adds Spring Boot enhancements to decomposed services that were produced by `banking-monolith-decomposition.sop.md`. It is **optional** — run it only when the team explicitly wants to add capabilities that were **not present in the original monolith**.
 
-**Core principle: decomposition preserves, not enhances.**
-The decomposed services MUST mirror the architecture of the original monolith.
-Features absent from the monolith MUST NOT be added during decomposition.
+**When to run this SOP:**
+- The team wants to add OpenAPI/Swagger documentation
+- The team wants to add Resilience4j circuit breakers
+- The team wants to add a `GlobalExceptionHandler` for consistent error responses
+- The team wants to upgrade or change the tech stack
+
+**When NOT to run this SOP:**
+- The decomposition SOP has already produced executable code that mirrors the monolith — that is sufficient for co-existence and independent deployment
+- The team wants to keep the decomposed services identical in architecture to the monolith
 
 The table below is the result of analysing the actual monolith codebase:
 

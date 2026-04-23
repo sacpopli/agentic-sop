@@ -4,7 +4,7 @@
 
 This SOP guides an agent through the full decomposition of a monolithic application into independently deployable microservices, each aligned to a set of industry-standard functional domains. The agent follows sequential phases — from codebase analysis through to scaffolding, test generation, and reporting.
 
-The SOP is **domain-model agnostic and tech-stack agnostic**. The target domains, service names, and industry framework (e.g., BIAN for banking, eTOM for telecoms, ARTS for retail) are provided as input parameters. The tech-stack-specific scaffolding (build descriptors, entity generation, test setup) is handled by a separate implementation SOP referenced in Steps 5 and 6.
+The SOP is **domain-model agnostic and tech-stack agnostic**. The target domains, service names, and industry framework (e.g., BIAN for banking, eTOM for telecoms, ARTS for retail) are provided as input parameters. The `language` parameter drives all code generation conventions — build descriptors, config files, HTTP clients, ORM patterns, and test frameworks are selected based on what the monolith already uses.
 
 The SOP produces independently deployable units that can co-exist alongside the monolith. The decision of how and when to adopt a migration pattern (e.g., Strangler Fig, parallel run, big-bang cutover) is an architectural and operational decision made **outside this SOP** by the team owning the monolith.
 
@@ -35,7 +35,18 @@ Parameters can be supplied in two ways:
 - **domain_model** (required): Description of the target domains to decompose into. Provide as a comma-separated list of domain names with their business scope. Example for banking (BIAN): `Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions`. Example for telecoms (eTOM): `Customer Management, Product Management, Service Management`. The agent will use this to drive classification in Step 2.
 - **output_path** (optional, default: `./decomposed`): Directory where scaffolded service directories will be created
 - **report_path** (optional, default: `./decomposition-report.md`): Path for the final decomposition report
-- **language** (optional, default: `java`): Primary programming language of the monolith (e.g., `java`, `python`, `nodejs`, `csharp`). Determines config file formats, source directory conventions, and which tech-stack implementation SOP to reference in Steps 5 and 6.
+- **language** (optional, default: `java`): Primary programming language of the monolith (e.g., `java`, `python`, `nodejs`, `csharp`). This is the key driver for all code generation in Step 5 — it determines build descriptor format, config file format, HTTP client library, ORM style, and test framework. Per-language conventions are inlined in each step.
+
+**Per-language quick reference:**
+
+| Concern | `java` | `python` | `nodejs` | `csharp` |
+|---|---|---|---|---|
+| Build descriptor | `pom.xml` / `build.gradle` | `pyproject.toml` / `requirements.txt` | `package.json` | `*.csproj` |
+| Config file | `application.yml` | `settings.py` / `.env` / `config.yaml` | `.env` / `config.json` | `appsettings.json` |
+| HTTP client | `RestTemplate` / `WebClient` | `requests` / `httpx` | `axios` / `node-fetch` | `HttpClient` |
+| ORM / data model | JPA `@Entity` | SQLAlchemy / Django Model | TypeORM / Sequelize | EF Core entity |
+| Test framework (default) | JUnit5 + Mockito | pytest + unittest.mock | Jest / Mocha | xUnit / NUnit |
+| Test file pattern | `*Test.java` | `test_*.py` / `*_test.py` | `*.test.js` / `*.spec.ts` | `*Tests.cs` |
 - **db_type** (optional, default: `same-as-monolith`): Target database engine for the decomposed service schemas. Defaults to the same database type detected in the monolith. Set explicitly to override — e.g., `postgresql`, `mysql`, `h2`, `oracle`, `mssql`.
 - **test_framework** (optional, default: derived from `language`): Unit test framework — e.g., `junit5` or `testng` for Java; `pytest` for Python; `jest` or `mocha` for Node.js; `xunit` or `nunit` for C#.
 - **phase** (optional, default: `all`): Which phase to execute — `1`, `2`, `3`, `4`, `5`, `6`, `7`, or `all`
@@ -97,7 +108,7 @@ Classify every module, class, and database table to one or more domains from `do
 
 ### 3. Service Boundary & Contract Definition
 
-Define what each domain service owns and how the services communicate.
+Define what each domain service owns and how the services communicate. This step produces the contract specification that Step 5 implements as code.
 
 **Constraints:**
 - You MUST define the aggregate roots and owned entities for each domain derived from `domain_model`
@@ -107,11 +118,40 @@ Define what each domain service owns and how the services communicate.
 - For each cross-domain dependency found, define:
   - **Synchronous REST API** if the caller needs a real-time response (e.g., validation before proceeding)
   - **REST Notification Callback** (`POST /internal/events`) if the caller only needs to inform the other service of a state change
-- You MUST generate a `DomainEvent` DTO in `shared-kernel` with fields: `eventId` (UUID), `type` (String), `occurredAt` (ISO8601), `payload` (Map)
-- You MUST generate an `EventPublisher` class per service that calls the target service's `/internal/events` endpoint using the HTTP client appropriate for `language`
-- You MUST generate an `InternalEventController` (or equivalent handler) per service that receives `POST /internal/events` and routes to the appropriate handler based on `event.type`
+
+**Three artifacts to specify for code generation in Step 5:**
+
+**1. Shared Event DTO** — a data transfer object representing a domain event, placed in `shared-kernel`. Fields: `eventId` (UUID), `type` (String), `occurredAt` (ISO8601 timestamp), `payload` (key-value map). Per-language implementation:
+
+| language | Implementation |
+|---|---|
+| `java` | Plain class with `@Data` (Lombok) or getters/setters; serialised to JSON via Jackson |
+| `python` | `dataclass` or `TypedDict`; serialised via `json` stdlib or `pydantic` |
+| `nodejs` | Plain JS/TS object or interface; serialised via `JSON.stringify` |
+| `csharp` | POCO class with auto-properties; serialised via `System.Text.Json` |
+
+**2. Notification Sender (EventPublisher)** — one per service; sends `POST /internal/events` to downstream services when a state change occurs. Per-language implementation:
+
+| language | HTTP client to use |
+|---|---|
+| `java` | `RestTemplate` or `WebClient` — whichever is already in the monolith's build descriptor |
+| `python` | `requests` or `httpx` — whichever is already in `requirements.txt` |
+| `nodejs` | `axios`, `node-fetch`, or built-in `https` — whichever is already in `package.json` |
+| `csharp` | `HttpClient` from `System.Net.Http` — already in .NET BCL |
+
+The sender MUST catch all HTTP errors and log a warning — it MUST NOT throw, because a failed notification must not roll back the originating transaction.
+
+**3. Notification Receiver (InternalEventController)** — one per service; exposes `POST /internal/events`, deserialises the event DTO, and routes to the appropriate handler based on `event.type`. Per-language implementation:
+
+| language | Implementation |
+|---|---|
+| `java` | `@RestController` with `@PostMapping("/internal/events")` |
+| `python` | Route handler in Flask/FastAPI/Django — e.g., `@app.post("/internal/events")` |
+| `nodejs` | Express/Fastify/Koa route — e.g., `router.post('/internal/events', handler)` |
+| `csharp` | Controller action with `[HttpPost("internal/events")]` |
+
 - You SHOULD flag any notification callback that could cause a circular call chain and document that the receiver MUST NOT re-notify the original sender
-- You MUST save the contract definitions as `{output_path}/phase3-contracts.md`
+- You MUST save the contract definitions (event names, payloads, sender→receiver routing) as `{output_path}/phase3-contracts.md`
 - You MUST NOT design shared databases between services because shared databases create tight coupling that defeats microservice independence
 
 ### 4. Database Decomposition
@@ -139,7 +179,31 @@ Decompose the monolith's shared database into domain-owned schemas, one per depl
   - A **synchronous API call** at runtime — use only when freshness is critical and latency is acceptable
 - You MUST document the chosen strategy for each cross-domain FK in `{output_path}/phase4b-table-ownership.md`
 
-**4c — Generate Domain Schema DDL**
+**4c — Generate Domain Data Model Classes**
+
+For each table owned by a domain (from Step 4b), generate the corresponding data model class in the service's source directory. This step is language-agnostic — the class structure mirrors the monolith's model classes, adapted to remove cross-domain ORM relationships.
+
+**Constraints:**
+- You MUST read the corresponding model/entity class from the monolith source and reproduce it in the decomposed service — do NOT rewrite from scratch
+- You MUST copy all field names, types, and constraints verbatim from the monolith source
+- You MUST copy all `enum` types and their constants verbatim — read the actual source file; do NOT infer or substitute values
+- You MUST replace all cross-domain ORM relationships with plain scalar reference fields:
+  - Remove `@ManyToOne`, `@OneToMany`, `ForeignKey`, or equivalent ORM annotations that reference a table owned by another domain
+  - Replace with a plain scalar field holding only the remote ID (e.g., `customerId: Long`, `customer_id: int`, `CustomerId: Guid`)
+  - Add a comment on every such field: `// ref: {owning-service}.{table}.{column} — synced via {EventName} REST notification`
+- You MUST add serialisation guards on any remaining bidirectional relationship fields to prevent circular serialisation (e.g., `@JsonIgnore` for Java, `exclude=True` for Python Pydantic, `JSON.stringify` replacer for Node.js)
+- You MUST generate exactly one model class per table per service — never duplicate mappings to the same table
+
+**Per-language model class conventions:**
+
+| language | ORM / model style | Cross-domain ref replacement |
+|---|---|---|
+| `java` | JPA `@Entity` + `@Table` + `@Id @GeneratedValue` | Remove `@ManyToOne`/`@OneToMany`; add `private Long {entityId}` |
+| `python` | SQLAlchemy `Base` + `Column` / Django `Model` / Pydantic `BaseModel` | Remove `relationship()`; add `{entity}_id: int` column |
+| `nodejs` | TypeORM `@Entity` / Sequelize `Model` / Mongoose `Schema` | Remove `@ManyToOne`/`@OneToMany`; add `{entityId}: number` field |
+| `csharp` | EF Core `DbContext` entity / Dapper POCO | Remove navigation properties; add `public int {Entity}Id` |
+
+**4d — Generate Domain Schema DDL**
 
 For each domain database, generate a standalone DDL script.
 
@@ -155,9 +219,9 @@ For each domain database, generate a standalone DDL script.
 - You MUST NOT include cross-database foreign key constraints because they create hard runtime coupling between services
 - You MUST include a schema version tracking table so migrations can be tracked independently per service
 
-**4d — Generate Domain Schema DDL (dialect-specific)**
+**4e — Generate Domain Schema DDL (dialect-specific)**
 
-Generate the same DDL as 4c but using syntax appropriate for `{db_type}`.
+Generate the same DDL as 4d but using syntax appropriate for `{db_type}`.
 
 **Constraints:**
 - You MUST write each DDL file into the service's resources directory following the `language` convention from Step 4c
@@ -166,7 +230,7 @@ Generate the same DDL as 4c but using syntax appropriate for `{db_type}`.
 - You MUST NOT include cross-database foreign key constraints
 - You MUST include a schema version tracking table per service
 
-**4e — Define Data Migration Options**
+**4f — Define Data Migration Options**
 
 **Constraints:**
 - You MUST document the data migration sequence needed to move data from the monolith's shared database into the domain databases, should the team choose to do so:
@@ -176,60 +240,209 @@ Generate the same DDL as 4c but using syntax appropriate for `{db_type}`.
   4. Validate row counts and checksums after each table migration
 - You MUST identify any tables that require a data transformation (not just a copy) during migration and describe the transformation
 - You MUST flag any table with more than 10 million rows as a `large-table` migration risk requiring an incremental/online migration strategy
-- You MUST save the migration options as `{output_path}/phase4e-migration-plan.md`
+- You MUST save the migration options as `{output_path}/phase4f-migration-plan.md`
 - You MUST NOT prescribe a specific cutover strategy (dual-write, Strangler Fig, big-bang, parallel run) because that decision is made outside this SOP by the team owning the monolith
 - You SHOULD document the trade-offs of common migration approaches (dual-write period, parallel run, big-bang) as informational notes so the team has the context to decide
 
-### 5. Scaffold Deployable Units
+### 5. Generate Deployable Units
 
-Create the skeleton directory structure for each domain service derived from `domain_model`, plus the shared kernel. This step is tech-stack agnostic — the actual build descriptor, source layout, and config file format depend on `language`. For tech-stack-specific scaffolding refer to the implementation SOP for the chosen stack.
+Generate fully executable, independently deployable service modules — one per domain in `domain_model` — plus a shared kernel. Each module must be runnable using the same tech stack as the monolith, with no enhancements or new dependencies beyond what the monolith already uses. The `language` parameter drives all code generation conventions throughout this step.
+
+**Core principle: read the monolith, reproduce faithfully, split by domain boundary.**
+
+---
+
+**5a — Read Monolith Build Descriptor**
+
+Before generating any code, read the monolith's build descriptor to capture the exact dependency set.
 
 **Constraints:**
-- You MUST create one service directory per domain in `domain_model`, plus a `shared-kernel` directory:
+- You MUST read the monolith's build descriptor (`pom.xml` for Java/Maven, `build.gradle` for Gradle, `package.json` for Node.js, `requirements.txt` / `pyproject.toml` for Python, `*.csproj` for C#)
+- You MUST record every dependency, version, and scope exactly as declared
+- You MUST use these exact versions in every generated service — do NOT upgrade, downgrade, or add dependencies not present in the monolith
+- You MUST add only two categories of new dependencies that are justified by decomposition:
+  1. A shared-kernel dependency (`com.bank:shared-kernel` or equivalent) — required because decomposition introduces this new artifact
+  2. Test dependencies (`spring-boot-starter-test`, `pytest`, `jest`, etc.) — required to run the unit tests generated in Step 6, only if the monolith had tests
+
+---
+
+**5b — Generate Build Descriptor per Service**
+
+Generate a build descriptor for each service and for shared-kernel.
+
+**Constraints:**
+- You MUST generate the build descriptor in the format appropriate for `language` and the build tool detected in the monolith
+- You MUST include all dependencies carried forward from the monolith's build descriptor
+- You MUST NOT add dependencies absent from the monolith (e.g., do not add OpenAPI, circuit breakers, or migration tools if the monolith did not use them)
+- You MUST set the parent/base version to match the monolith exactly (e.g., Spring Boot parent version, Node.js engine version)
+- For `shared-kernel`, you MUST generate a library build descriptor (not a runnable application) — e.g., plain JAR for Java with no application plugin, a library `package.json` for Node.js
+
+**Per-language build descriptor conventions:**
+
+| language | Build descriptor | Service type | Shared-kernel type |
+|---|---|---|---|
+| `java` (Maven) | `pom.xml` with `spring-boot-starter-parent` | Executable JAR via `spring-boot-maven-plugin` | Plain JAR, no boot plugin |
+| `java` (Gradle) | `build.gradle` | `bootJar` task | `jar` task only |
+| `nodejs` | `package.json` | `main` entry + `start` script | `main` entry, no `start` script |
+| `python` | `pyproject.toml` or `requirements.txt` | Runnable app entry point | Library package, no entry point |
+| `csharp` | `*.csproj` | `<OutputType>Exe</OutputType>` | `<OutputType>Library</OutputType>` |
+
+---
+
+**5c — Generate Application Entry Point**
+
+**Constraints:**
+- You MUST generate an application entry point for each service in the style used by the monolith
+- You MUST configure the component/bean scan to include both the service's own package and the shared-kernel package so shared utilities are discovered at startup
+- You MUST NOT add startup configuration that did not exist in the monolith (e.g., do not add health check endpoints, metrics, or banner customisation unless the monolith had them)
+
+---
+
+**5d — Generate Data Model Classes**
+
+For each table owned by the service (from Step 4b), generate the corresponding data model class.
+
+**Constraints:**
+- You MUST read the corresponding entity/model class from the monolith source and reproduce it in the decomposed service — do NOT rewrite from scratch
+- You MUST copy all field names, types, annotations, and constraints verbatim from the monolith source
+- You MUST copy all `enum` types and their constants verbatim — read the actual source file; do NOT infer or substitute values
+- You MUST replace all cross-domain ORM relationships (e.g., `@ManyToOne`, `@OneToMany`, foreign key references) with plain scalar reference fields (e.g., `private Long customerId`) because the referenced entity lives in a different service's database
+- You MUST add a comment on every cross-domain reference field explaining what it references and how it is kept in sync (e.g., `// ref: customer-service — synced via CustomerProfileUpdated REST notification`)
+- You MUST add `@JsonIgnore` (or language equivalent) on any bidirectional relationship fields to prevent circular serialisation
+- You MUST generate exactly one model class per table per service — never duplicate mappings to the same table
+
+---
+
+**5e — Generate Repository / Data Access Layer**
+
+**Constraints:**
+- You MUST read each repository or DAO class from the monolith and reproduce it in the owning service
+- You MUST carry forward all query methods exactly as declared in the monolith
+- You MUST NOT add query methods that did not exist in the monolith
+
+---
+
+**5f — Generate Service Layer**
+
+**Step 2 classification drives every decision in this sub-step.** Before writing any code, read the classification matrix from `{output_path}/phase2-classification.md` and apply the action for each class:
+
+| Step 2 action | What Step 5f does |
+|---|---|
+| `move` | Read the class from the monolith and write it verbatim to the target service. No changes to method bodies. |
+| `split` | Read the class from the monolith. Write only the methods assigned to this service's domain. Replace every cross-domain call in those methods with a REST call through the client interface generated in Step 5h. |
+| `extract-method` | Read the method from the monolith. Identify the domain-specific lines per the Step 2 notes. Extract those lines into a new method in this service. Replace the cross-domain portion with a REST call. |
+| `shared-kernel` | Do not generate in any domain service — handled in Step 5j. |
+| `facade` | Do not generate — flagged for team decision outside this SOP. |
+| `ambiguous` | Do not generate — document in report as requiring manual resolution before code can be produced. |
+
+**Constraints:**
+- You MUST read the Step 2 classification matrix before generating any service class
+- You MUST NOT copy a method that Step 2 assigned to a different domain into this service
+- You MUST replace all direct cross-domain repository or service calls with REST API calls through the cross-domain client interface generated in Step 5h
+- You MUST NOT add business logic that did not exist in the monolith
+
+---
+
+**5g — Generate REST Controllers**
+
+**Constraints:**
+- You MUST read each controller from the monolith and reproduce the domain-relevant endpoints in the owning service
+- You MUST carry forward all request mappings, HTTP methods, path variables, request bodies, and response types exactly as declared in the monolith
+- You MUST NOT add new endpoints that did not exist in the monolith
+- You MUST generate an `InternalEventController` (or language-equivalent handler) per service that exposes `POST /internal/events` to receive REST notification callbacks from other services — this is a new endpoint required by decomposition, not an enhancement
+
+---
+
+**5h — Generate Cross-Domain REST Clients**
+
+For every cross-domain dependency identified in Step 3, generate a client interface and implementation.
+
+**Constraints:**
+- You MUST generate one client interface per downstream service dependency (e.g., `CustomerServiceClient`, `AccountServiceClient`)
+- You MUST implement the client using the HTTP client library already present in the monolith's build descriptor — do NOT introduce a new HTTP client library
+- You MUST implement only the methods that correspond to actual cross-domain calls found in the monolith — do NOT generate speculative methods
+- You MUST read the target service's base URL from configuration (not hardcoded) so it can be overridden per environment
+- You MUST generate an `EventPublisher` per service that sends REST notification callbacks (`POST /internal/events`) to downstream services for state change events identified in Step 3
+- The `EventPublisher` MUST catch HTTP errors and log a warning without throwing — a failed notification MUST NOT roll back the originating transaction
+
+---
+
+**5i — Carry Forward Cross-Cutting Configuration**
+
+**Constraints:**
+- You MUST read every cross-cutting config class from the monolith (security config, CORS config, logging config, etc.) and reproduce it in each service that needs it
+- You MUST adapt security config to also permit `/internal/events` without authentication — this is the only permitted adaptation, required by decomposition
+- You MUST NOT add new config classes that did not exist in the monolith
+- You MUST generate a service config file (format per `language`) containing:
+  - Database connection URL, username, password for `{db_type}`
+  - Base URLs for all downstream services this service calls
+  - Only the config properties relevant to this service's domain (identified from the config inventory in Step 1)
+- You MUST generate a local development config override using an in-memory or embedded database so the service starts without a running database server
+- You MUST copy shared infrastructure properties (logging levels, etc.) to all services
+- You MUST flag ambiguous properties with a comment: `# TODO: verify this property is needed by this service`
+
+---
+
+**5j — Generate Shared Kernel**
+
+**Constraints:**
+- You MUST generate the shared-kernel module containing all classes classified as `shared-kernel` in Step 2 (cross-cutting utilities, common DTOs, audit logger, reference generators, etc.)
+- You MUST generate a `DomainEvent` DTO with fields: `eventId` (UUID), `type` (String), `occurredAt` (ISO8601), `payload` (Map) — this is a new artifact required by decomposition for REST notification callbacks
+- You MUST NOT add shared utilities that did not exist in the monolith
+
+---
+
+**5k — Generate docker-compose.yml**
+
+**Constraints:**
+- You MUST generate a `docker-compose.yml` at `{output_path}/docker-compose.yml` that wires all services together with one separate database instance per service
+- You MUST NOT share a database container between services
+- You MUST NOT add a message broker container — all inter-service communication is REST
+
+---
+
+**Output directory structure:**
 
 ```
 {output_path}/
 ├── {service-1}/
-│   ├── src/
-│   │   ├── main/
-│   │   └── test/                       ← populated by Step 6
+│   ├── src/main/          ← service layer, controllers, model, repository, clients, config
+│   ├── src/test/          ← populated by Step 6 (if monolith had tests)
 │   ├── resources/
-│   │   └── application.{ext}
+│   │   ├── application.{ext}
+│   │   └── application-local.{ext}
 │   ├── db/
-│   │   └── V1__{service-1}_schema.sql  ← generated by Step 4c
+│   │   └── V1__{service-1}_schema.sql
 │   ├── Dockerfile
 │   ├── {build-descriptor}
 │   └── README.md
-├── {service-2}/
-│   └── ...                             ← same structure
 ├── {service-N}/
-│   └── ...                             ← one per domain in domain_model
+│   └── ...                ← same structure, one per domain
 ├── shared-kernel/
-│   ├── src/
-│   │   ├── main/
-│   │   └── test/
-│   ├── {build-descriptor}
-│   └── README.md
-└── docker-compose.yml                  ← N services + N separate DB instances
+│   ├── src/main/          ← DomainEvent DTO, shared utilities carried from monolith
+│   ├── src/test/
+│   └── {build-descriptor}
+└── docker-compose.yml
 ```
-
-- You MUST run Step 4 (Database Decomposition) before this step because the `db/` directories depend on the DDL files generated in Step 4d
-- You MUST NOT create the `db/` directories with placeholder content — they MUST contain the actual generated DDL from Step 4d
-- You MUST populate each `README.md` with: domain name, BIAN service domains it covers, owned entities, REST notification events published and consumed, and exposed API endpoints
-- You MUST create a configuration file for each service (format depends on `language` and framework) containing: database connection URL, credentials, and the base URLs of downstream services this service calls
-- You MUST create a local development configuration override for each service that uses an in-memory or embedded database so the service can start without a running database server
-- You MUST NOT put shared database connection strings in service configs because each service must own its own data store
-- You MUST add service URL properties to each service's config for every downstream service it calls so the `EventPublisher` and cross-domain clients can resolve target URLs via configuration
-- You MUST generate a build descriptor for each service appropriate to `language` that includes all dependencies required to: run the web server, connect to the database, perform schema migration, call other services via HTTP, and run unit tests. Refer to the tech-stack-specific implementation SOP for the exact dependency list.
 
 ### 6. Unit Test Generation
 
 **Pre-condition check — MUST be done before generating any tests:**
-- You MUST scan `{monolith_path}` for existing test files (e.g., `*Test.java`, `*_test.py`, `*.test.js`, `*.spec.ts`, `*Tests.cs`)
-- If **no test files are found** in the monolith, you MUST skip this entire step and note in the report that the monolith had no unit tests and therefore none were generated for the decomposed services
-- If **test files are found**, proceed with the steps below — the decomposed services should have tests that mirror the coverage and style of the monolith's existing tests
 
-For every class moved or generated into a decomposed service in Step 5, generate a corresponding unit test class covering all public methods. Tests must be runnable in isolation without depending on other services or shared databases.
+Check the monolith's build descriptor for test framework dependencies — this is the definitive signal that the monolith was built with testing in mind:
+
+| language | Build descriptor | Test framework indicators to look for |
+|---|---|---|
+| `java` | `pom.xml` / `build.gradle` | `junit`, `mockito`, `spring-boot-starter-test`, `testng`, `assertj` |
+| `python` | `pyproject.toml` / `requirements.txt` / `setup.cfg` | `pytest`, `unittest`, `mock`, `hypothesis` |
+| `nodejs` | `package.json` (`devDependencies`) | `jest`, `mocha`, `chai`, `sinon`, `vitest`, `jasmine` |
+| `csharp` | `*.csproj` | `xunit`, `nunit`, `mstest`, `moq`, `fluentassertions` |
+
+- You MUST read the monolith's build descriptor and check for any of the above test framework dependencies
+- If **no test framework dependency is found**, you MUST skip this entire step and note in the report that the monolith had no test framework configured and therefore no tests were generated for the decomposed services
+- If **a test framework dependency is found**, proceed with the steps below — use that same framework in the decomposed services
+
+For every class moved or generated into a decomposed service in Step 5, generate a corresponding unit test class covering all public methods. Tests must be runnable in isolation without depending on other services or shared databases. Use the test framework appropriate for `language` (see the per-language quick reference table in Parameters).
 
 **6a — Service Layer Tests**
 
@@ -291,7 +504,7 @@ Produce a comprehensive report summarising all findings and recommended next ste
 **Constraints:**
 - You MUST write the report to `report_path`
 - You MUST include the following sections in the report:
-  1. **Executive Summary** — monolith size, number of modules classified, target services identified (one per domain in `domain_model`)
+  1. **Executive Summary** — monolith size, number of modules classified, target services generated (one per domain in `domain_model`)
   2. **Domain Classification Matrix** — full table from Phase 2
   3. **Ambiguous Modules** — list of flagged items with recommended ownership decisions
   4. **Inter-Domain Contracts** — synchronous REST query APIs and REST notification callback contracts (DomainEvent payloads per event type) from Phase 3
@@ -300,7 +513,7 @@ Produce a comprehensive report summarising all findings and recommended next ste
   7. **Shared Kernel Contents** — list of cross-cutting components extracted
   8. **Recommended Decomposition Order** — suggested sequence for scaffolding services based on coupling analysis (least coupled first), presented as a recommendation not a prescription
   9. **Risk Register** — at minimum cover: data consistency, distributed transactions, network latency, team silos, large-table migration complexity
-  10. **Definition of Done checklist** — per service: code extracted, own DB schema with migration scripts, REST API contract documented, REST notification contract documented (DomainEvent payloads), unit tests generated with >=80% coverage, CI/CD pipeline (including test execution gate), observability, integration tests passing
+  10. **Definition of Done checklist** — per service: executable code generated, own DB schema, build descriptor with correct dependencies, config files, unit tests (if monolith had tests), CI/CD pipeline, observability, integration tests passing
   11. **Recommended Next Steps** — prioritised action list
 - You MUST NOT omit the Risk Register section because unaddressed risks are the primary cause of failed decomposition projects
 - You SHOULD include estimated effort (S/M/L) for each recommended next step
