@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy this file, rename to decomposition-config.json, fill in your values, then run: run monolith-decomposition.sop.md with config_file=./decomposition-config.json",
+
+  "monolith_path": "./banking-monolith",
+
+  "domain_model": "Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions",
+
+  "output_path": "./decomposed",
+
+  "report_path": "./decomposition-report.md",
+
+  "language": "java",
+
+  "db_type": "same-as-monolith",
+
+  "test_framework": "junit5",
+
+  "phase": "all"
+}
