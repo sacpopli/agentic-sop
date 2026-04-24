@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy this file, rename to decomposition-config.json, fill in your values, then run: run monolith-decomposition.sop.md with config_file=./decomposition-config.json",
+
+  "monolith_path": "../node-banking-monolith",
+
+  "domain_model": "Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions, Loan",
+
+  "output_path": "../decomposed_nodejs",
+
+  "report_path": "../decomposed_nodejs/decomposition-report.md",
+
+  "language": "nodejs",
+
+  "db_type": "same-as-monolith",
+
+  "test_framework": "Jest",
+
+  "phase": "all"
+}
