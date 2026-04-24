@@ -3,6 +3,8 @@
 
   "monolith_path": "../banking-monolith",
 
+  "industry_standard": "BIAN",
+  
   "domain_model": "Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions",
 
   "output_path": "../decomposed_e2e_v3",
