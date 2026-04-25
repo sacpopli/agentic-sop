@@ -260,7 +260,7 @@ run monolith-decomposition.sop.md with \
   decomposition_mode=module
 ```
 
-**Result:** ✅ Module decomposition with ACORD-aligned boundaries + migration path
+**Result:** ✅ Module decomposition with domain aligned boundaries + migration path
 
 ---
 
@@ -310,6 +310,7 @@ run monolith-decomposition.sop.md with \
 ### 3. Let Auto-Detection Work
 ✅ **Do:** Omit `decomposition_mode` (auto-detects from tech stack)
 ❌ **Don't:** Force `decomposition_mode=full` on Java EE (won't work)
+**Note:** When using auto-detect mode, the outcomes may not be deterministic all the time. Use auto-detect carefully.
 
 ### 4. Start with Inventory
 Run Phase 1 first to understand your codebase:
