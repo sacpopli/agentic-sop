@@ -70,7 +70,7 @@ Read this file before executing any phase of the SOP. These rules encode known f
 
 ## Output Templates — use these exact structures every run
 
-These templates are derived from the reference run (`decomposed_e2e`). Fill in values; do not change headings, column names, or section order.
+These templates are derived from the reference run. Fill in values; do not change headings, column names, or section order.
 
 ---
 
