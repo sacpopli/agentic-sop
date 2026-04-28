@@ -68,7 +68,7 @@ Below diagram shows, what happens in process of breaking down the monolith to do
 
 #### Option A — Inline parameters
 ```
-run monolith-decomposition.sop.md with monolith_path=./banking-monolith language=java domain_model="Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions"
+run monolith-decomposition.sop.md with monolith_path=../banking-monolith language=java domain_model="Customer & Party Management, Product & Account Servicing, Payments & Financial Transactions"
 ```
 
 #### Option B — Config file (recommended for repeatable runs)
