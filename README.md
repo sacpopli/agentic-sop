@@ -1,30 +1,39 @@
 ﻿# Agentic SOP — Monolith Decomposition
 
 ## Overview
-Analysis of monolith applications to break it down to individual modules, generally takes week or more time, depending on the complexity and size of the application. This accelerator, will help accelerate this monolith breakdown and generate the domain wise segregated code within hours.
+Analysis of monolith applications to break it down to individual modules per domain, generally takes week or more time, depending on the complexity and size of the application. This accelerator, will help accelerate this monolith breakdown and generate the domain wise segregated code within hours (best on test results).
 
 The accelerator makes use of AWS Kiro Agent SOPs (Standard Operating Procedures) to achieve the required goal. To understand more about Agent SOP, check [here](https://goagentic.ch/)
 
+**Note:** The Kiro Agent SOP's itself was generated with help of AWS Kiro using Vibe Coding mode. Use AWS Kiro to enhance this Agent SOP for any enhancement / custom requirements.
+
 There are 2 possible flows to use this accelerator.
 
-Flow1: Monolith App Code -> Domain Analysis -> Decompose -> Transform -> Transformed modules.
+**Flow1: Monolith App Code -> Domain Analysis -> Decompose -> Transform -> Transformed modules.**
 
-Use this flow when tech stack of the original monolith code is based on some of the current tech stack based on Spring, Node JS, React etc. It can be used for apps with old tech stack also, but difference will be that, for apps based on current tech stack, the generated decomposed modules can also be deployed and tested, but not for apps with legacy tech stack. For apps with legacy tech stack, the output will be modules generated as per domains identified, but can not be deployed / tested.
+Use this flow when tech stack of the original monolith code is based on some of the current tech stack based on Spring, Node JS, React etc. It can be used for apps with old tech stack also, but difference will be that, for apps based on more recent tech stack, the generated decomposed modules can also be deployed and tested, but not for apps with legacy tech stack. For apps with legacy tech stack, the output will be modules generated as per domains identified, but can not be deployed / tested.
 
 ![DecomposeProcess](./assets/Decompose.png)
 
-Flow2: Monolith App Code -> Transformed Monolith App Code -> Domain Analysis -> Decompose -> Transformed modules.
+**Flow2: Monolith App Code -> Transformed Monolith App Code -> Domain Analysis -> Decompose -> Transformed modules.**
 
-Use this flow, when tech stack of the original monolith code is based on very legacy code, for e.g. Struts, JSP, EJB etc. By using this approach for legacy tech stacks, the decomposed modules can be deployed and tested also.
+Use this flow, when tech stack of the original monolith code is based on legacy tech stack, for e.g. Struts, JSP, EJB etc. In this approach, before monolith can be domain wise decomposed into individual executable and deployable code, the original monolith code based is transformed (using agentic technique like AWS transform). By using this approach the input to the Agentic SOP is based on latest tech stack and the decomposed modules can be deployed and tested also.
 
 ![DecomposeProcess](./assets/Decompose2.png)
 
 
-**Note:** The scope of accelerator is limited to generating the decomposed modules (blue highlighted box). The Domain analysis of the monolith application includes identifying to which domains / sub-domains the monolith application belong to. That can be done using any of the Domain analysis tool, like CBM etc. Once the Application Domains have been identified, it can be provided as an input to the accelerator and the accelerator will generate the decomposed modules, keeping the code level architecture same as original monolith application. Any enhancements / modernization to generated code w.r.t. additional capabilities for e.g. circuit breaker pattern, changing the tech stack or others, has to be handled outside the accelerator as of now.
+**Note:** The scope of accelerator is limited to generating the decomposed modules (blue highlighted box). The Domain analysis (identifying to which all domains/sub-domains are embedded in the monolith) of the monolith application, can be done using any of the Domain analysis tool, like CBM etc. Once the Application Domains have been identified, it can be provided as an input to the accelerator and the accelerator will generate the decomposed modules, keeping the code level architecture same as original monolith application. Any enhancements / modernization to generated code w.r.t. additional capabilities for e.g. circuit breaker pattern, changing the tech stack or others, has to be handled outside the accelerator as of now.
 
 Below diagram shows, what happens in process of breaking down the monolith to domain specific modules.
 
 ![DecomposeProcess](./assets/agenticSOP.png)
+
+* Codebase Inventory: Scans the whole codebase to analyse the code base structure, dependency map, entry points, entity modesl, constant / config values, db tables and schema.
+* Domain Classification: Analysis of which classes / methods belongs to which one or more Domains and action (move, split, shared, facade) to be taken on the class / method.
+* Inter-Domain API: Analyze where-ever there are inter-domain dependencies in existing monolith, how will those be resolved when code is segregated across different modules as per domain decomposition.
+* DB Schema / table ownership: Assign table ownership as per the domain boundaries and identifies cross-domain foreign key references and strategy to resolve those. Also, recommendation for data migration plan from shared monolith to separate domain database.
+* Code Generation: Code segregration as per individual Domain decomposed modules.
+* Unit test generation: This is optional step. This gets executed only if original code base had unit test cases. This can be generated separately also.  
 
 **Note:** The decomposed modules generated by the accelerator make one change to the generated code. Whereever in the monolith code base, there were in-memory calls to cross domain class / methods, those are converted to RESTful API calls in the decomposed modules.
 
