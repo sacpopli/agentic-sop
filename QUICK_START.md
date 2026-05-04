@@ -96,6 +96,7 @@ run monolith-decomposition.sop.md with \
   monolith_path=./telecom-app \
   industry_standard=eTOM \
   language=python \
+  db_type=postgresql \
   domain_model="Customer Management, Product Management, Service Management"
 ```
 
@@ -110,6 +111,7 @@ run monolith-decomposition.sop.md with \
   monolith_path=./retail-app \
   industry_standard=ARTS \
   language=nodejs \
+  db_type=mongodb \
   domain_model="Customer, Inventory, Order Management, Payment"
 ```
 
