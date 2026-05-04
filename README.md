@@ -57,12 +57,14 @@ Below diagram shows, what happens in process of breaking down the monolith to do
 7. Unit test generation (conditional).
 8. Produce a comprehensive report summarizing all findings and recommended next steps.
 
+**Note:** As of this writing, the SOP was tested using AWS Kiro CLI and Claude Code, with positive outcomes.  
+
 ## Files
 
 | File | Purpose |
 |---|---|
-| `monolith-decomposition.sop.md` | Main decomposition SOP — for modern stacks (Spring Boot, Node.js, Python, .NET Core). Produces fully executable decomposed modules. |
-| `monolith-decomposition.skills.md` | Skills / hard gates file for the main SOP |
+| `monolith-decomposition.sop.md` | Main decomposition SOP — Produces domain aligned modules. |
+| `monolith-decomposition.skills.md` | Skills / hard gates file for the main SOP, to ensure output results are deterministic |
 | `decomposition-config.example.json` | Example config for the main SOP — copy and fill in for your project |
 
 ---
