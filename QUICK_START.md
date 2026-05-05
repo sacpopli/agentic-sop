@@ -366,8 +366,6 @@ run monolith-decomposition.sop.md with \
 ## Need Help?
 
 - **Industry Standards:** See `INDUSTRY_STANDARDS_GUIDE.md`
-- **Detailed Changes:** See `REFACTORING_SUMMARY.md`
-- **All Changes:** See `CHANGES_SUMMARY.md`
 - **Full SOP:** See `monolith-decomposition.sop.md`
 
 ---
