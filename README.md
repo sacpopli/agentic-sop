@@ -57,7 +57,7 @@ Below diagram shows, what happens in process of breaking down the monolith to do
 7. Unit test generation (conditional).
 8. Produce a comprehensive report summarizing all findings and recommended next steps.
 
-**Note:** As of this writing, the SOP was tested using AWS Kiro CLI and Claude Code, with positive outcomes.  
+**Note:** As of this writing, the SOP was tested using AWS Kiro CLI.
 
 ## Files
 
